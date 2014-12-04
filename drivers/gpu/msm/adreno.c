@@ -49,7 +49,6 @@
 
 #define KGSL_LOG_LEVEL_DEFAULT 3
 
-static void adreno_start_work(struct work_struct *work);
 static void adreno_input_work(struct work_struct *work);
 
 /*
@@ -104,15 +103,104 @@ static struct adreno_device device_3d0 = {
 	.ft_pf_policy = KGSL_FT_PAGEFAULT_DEFAULT_POLICY,
 	.fast_hang_detect = 1,
 	.long_ib_detect = 1,
-	.start_work = __WORK_INITIALIZER(device_3d0.start_work,
-		adreno_start_work),
 	.input_work = __WORK_INITIALIZER(device_3d0.input_work,
 		adreno_input_work),
 };
 
 unsigned int ft_detect_regs[FT_DETECT_REGS_COUNT];
 
-static struct workqueue_struct *adreno_wq;
+/*
+ * This is the master list of all GPU cores that are supported by this
+ * driver.
+ */
+
+#define ANY_ID (~0)
+#define NO_VER (~0)
+
+static const struct {
+	enum adreno_gpurev gpurev;
+	unsigned int core, major, minor, patchid;
+	const char *pm4fw;
+	const char *pfpfw;
+	struct adreno_gpudev *gpudev;
+	unsigned int istore_size;
+	unsigned int pix_shader_start;
+	/* Size of an instruction in dwords */
+	unsigned int instruction_size;
+	/* size of gmem for gpu*/
+	unsigned int gmem_size;
+	/* version of pm4 microcode that supports sync_lock
+	   between CPU and GPU for IOMMU-v0 programming */
+	unsigned int sync_lock_pm4_ver;
+	/* version of pfp microcode that supports sync_lock
+	   between CPU and GPU for IOMMU-v0 programming */
+	unsigned int sync_lock_pfp_ver;
+	/* PM4 jump table index */
+	unsigned int pm4_jt_idx;
+	/* PM4 jump table load addr */
+	unsigned int pm4_jt_addr;
+	/* PFP jump table index */
+	unsigned int pfp_jt_idx;
+	/* PFP jump table load addr */
+	unsigned int pfp_jt_addr;
+	/* PM4 bootstrap loader size */
+	unsigned int pm4_bstrp_size;
+	/* PFP bootstrap loader size */
+	unsigned int pfp_bstrp_size;
+	/* PFP bootstrap loader supported version */
+	unsigned int pfp_bstrp_ver;
+
+} adreno_gpulist[] = {
+	{ ADRENO_REV_A200, 0, 2, ANY_ID, ANY_ID,
+		"yamato_pm4.fw", "yamato_pfp.fw", &adreno_a2xx_gpudev,
+		512, 384, 3, SZ_256K, NO_VER, NO_VER },
+	{ ADRENO_REV_A203, 0, 1, 1, ANY_ID,
+		"yamato_pm4.fw", "yamato_pfp.fw", &adreno_a2xx_gpudev,
+		512, 384, 3, SZ_256K, NO_VER, NO_VER },
+	{ ADRENO_REV_A205, 0, 1, 0, ANY_ID,
+		"yamato_pm4.fw", "yamato_pfp.fw", &adreno_a2xx_gpudev,
+		512, 384, 3, SZ_256K, NO_VER, NO_VER },
+	{ ADRENO_REV_A220, 2, 1, ANY_ID, ANY_ID,
+		"leia_pm4_470.fw", "leia_pfp_470.fw", &adreno_a2xx_gpudev,
+		512, 384, 3, SZ_512K, NO_VER, NO_VER },
+	/*
+	 * patchlevel 5 (8960v2) needs special pm4 firmware to work around
+	 * a hardware problem.
+	 */
+	{ ADRENO_REV_A225, 2, 2, 0, 5,
+		"a225p5_pm4.fw", "a225_pfp.fw", &adreno_a2xx_gpudev,
+		1536, 768, 3, SZ_512K, NO_VER, NO_VER },
+	{ ADRENO_REV_A225, 2, 2, 0, 6,
+		"a225_pm4.fw", "a225_pfp.fw", &adreno_a2xx_gpudev,
+		1536, 768, 3, SZ_512K, 0x225011, 0x225002 },
+	{ ADRENO_REV_A225, 2, 2, ANY_ID, ANY_ID,
+		"a225_pm4.fw", "a225_pfp.fw", &adreno_a2xx_gpudev,
+		1536, 768, 3, SZ_512K, 0x225011, 0x225002 },
+	/* A3XX doesn't use the pix_shader_start */
+	{ ADRENO_REV_A305, 3, 0, 5, 0,
+		"a300_pm4.fw", "a300_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_256K, 0x3FF037, 0x3FF016 },
+	/* A3XX doesn't use the pix_shader_start */
+	{ ADRENO_REV_A320, 3, 2, ANY_ID, ANY_ID,
+		"a300_pm4.fw", "a300_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_512K, 0x3FF037, 0x3FF016 },
+	{ ADRENO_REV_A330, 3, 3, 0, ANY_ID,
+		"a330_pm4.fw", "a330_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_1M, NO_VER, NO_VER, 0x8AD, 0x2E4, 0x201, 0x200,
+		0x6, 0x20, 0x330020 },
+	{ ADRENO_REV_A305B, 3, 0, 5, 0x10,
+		"a330_pm4.fw", "a330_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_128K, NO_VER, NO_VER, 0x8AD, 0x2E4,
+		0x201, 0x200 },
+	/* 8226v2 */
+	{ ADRENO_REV_A305B, 3, 0, 5, 0x12,
+		"a330_pm4.fw", "a330_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_128K, NO_VER, NO_VER, 0x8AD, 0x2E4,
+		0x201, 0x200 },
+	{ ADRENO_REV_A305C, 3, 0, 5, 0x20,
+		"a300_pm4.fw", "a300_pfp.fw", &adreno_a3xx_gpudev,
+		512, 0, 2, SZ_128K, 0x3FF037, 0x3FF016 },
+};
 
 /* Nice level for the higher priority GPU start thread */
 static unsigned int _wake_nice = -7;
@@ -1885,9 +1973,6 @@ static int adreno_init(struct kgsl_device *device)
 	int i;
 	int ret;
 
-	/* Make a high priority workqueue for starting the GPU */
-	adreno_wq = alloc_workqueue("adreno", 0, 1);
-
 	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
 	/*
 	 * initialization only needs to be done once initially until
@@ -2075,74 +2160,30 @@ error_clk_off:
 	return status;
 }
 
-static int _status;
-
-/**
- * _adreno_start_work() - Work handler for the low latency adreno_start
- * @work: Pointer to the work_struct for
- *
- * The work callbak for the low lantecy GPU start - this executes the core
- * _adreno_start function in the workqueue.
- */
-static void adreno_start_work(struct work_struct *work)
-{
-	struct adreno_device *adreno_dev = container_of(work,
-		struct adreno_device, start_work);
-	struct kgsl_device *device = &adreno_dev->dev;
-
-	/* Nice ourselves to be higher priority but not too high priority */
-	set_user_nice(current, _wake_nice);
-
-	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
-	/*
-	 *  If adreno start is already called, no need to call it again
-	 *  it can lead to unpredictable behavior if we try to start
-	 *  the device that is already started.
-	 *  Below is the sequence of events that can go bad without the check
-	 *  1) thread 1 calls adreno_start to be scheduled on high priority wq
-	 *  2) thread 2 calls adreno_start with normal priority
-	 *  3) thread 1 after checking the device to be in slumber state gives
-	 *     up mutex to be scheduled on high priority wq
-	 *  4) thread 2 after checking the device to be in slumber state gets
-	 *     the mutex and finishes adreno_start before thread 1 is scheduled
-	 *     on high priority wq.
-	 *  5) thread 1 gets scheduled on high priority wq and executes
-	 *     adreno_start again. This leads to unpredictable behavior.
-	 */
-	if (!test_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv))
-		_status = _adreno_start(adreno_dev);
-	else
-		_status = 0;
-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
-}
-
 /**
  * adreno_start() - Power up and initialize the GPU
  * @device: Pointer to the KGSL device to power up
  * @priority:  Boolean flag to specify of the start should be scheduled in a low
  * latency work queue
  *
- * Power up the GPU and initialize it.  If priority is specified then queue the
- * start function in a high priority queue for lower latency.
+ * Power up the GPU and initialize it. If priority is specified then elevate
+ * the thread priority for the duration of the start operation
  */
 static int adreno_start(struct kgsl_device *device, int priority)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+	int nice = task_nice(current);
+	int ret;
 
-	/* No priority (normal latency) call the core start function directly */
-	if (!priority)
-		return _adreno_start(adreno_dev);
+	if (priority && (_wake_nice < nice))
+		set_user_nice(current, _wake_nice);
 
-	/*
-	 * If priority is specified (low latency) then queue the work in a
-	 * higher priority work queue and wait for it to finish
-	 */
-	queue_work(adreno_wq, &adreno_dev->start_work);
-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
-	flush_work(&adreno_dev->start_work);
-	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+	ret = _adreno_start(adreno_dev);
 
-	return _status;
+	if (priority)
+		set_user_nice(current, nice);
+
+	return ret;
 }
 
 static int adreno_stop(struct kgsl_device *device)
