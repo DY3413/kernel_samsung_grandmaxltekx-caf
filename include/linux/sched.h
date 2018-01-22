@@ -103,6 +103,10 @@ extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
 extern unsigned long this_cpu_load(void);
 
+#ifdef CONFIG_RUNTIME_COMPCACHE
+extern unsigned long this_cpu_loadx(int i);
+#endif /* CONFIG_RUNTIME_COMPCACHE */
+
 extern void sched_update_nr_prod(int cpu, unsigned long nr, bool inc);
 extern void sched_get_nr_running_avg(int *avg, int *iowait_avg);
 
@@ -1005,11 +1009,16 @@ struct ravg {
 	 * sysctl_sched_ravg_hist_size windows. 'demand' could drive frequency
 	 * demand for tasks.
 	 *
+	 * 'prev_window' is the history in the most recent window. This value
+	 * may be zero if there was no task activity in that window - that is
+	 * how this quantity differs from the most recent sample in
+	 * sum_history (empty windows are ignored in sum_history).
+	 *
 	 * 'flags' can have either or both of PREV_WINDOW_CONTRIB and
 	 * CURR_WINDOW_CONTRIB set.
 	 */
 	u64 mark_start;
-	u32 sum, demand, partial_demand, flags;
+	u32 sum, demand, prev_window, partial_demand, flags;
 	u32 sum_history[RAVG_HIST_SIZE_MAX];
 };
 
@@ -1828,15 +1837,7 @@ sched_set_cpu_cstate(int cpu, int cstate, int wakeup_energy, int wakeup_latency)
 #endif
 
 #ifdef CONFIG_SCHED_HMP
-
 extern int sched_set_boost(int enable);
-extern int sched_set_cpu_mostly_idle_load(int cpu, int mostly_idle_pct);
-extern int sched_get_cpu_mostly_idle_load(int cpu);
-extern int sched_set_cpu_mostly_idle_nr_run(int cpu, int nr_run);
-extern int sched_get_cpu_mostly_idle_nr_run(int cpu);
-extern int sched_set_cpu_mostly_idle_freq(int cpu, unsigned int mostly_idle_freq);
-extern unsigned int sched_get_cpu_mostly_idle_freq(int cpu);
-
 #else
 static inline int sched_set_boost(int enable)
 {
@@ -2065,11 +2066,6 @@ extern void wake_up_new_task(struct task_struct *tsk);
 #endif
 extern void sched_fork(struct task_struct *p);
 extern void sched_dead(struct task_struct *p);
-#if defined(CONFIG_SCHED_HMP) || defined(CONFIG_SCHED_FREQ_INPUT)
-extern void sched_exit(struct task_struct *p);
-#else
-static inline void sched_exit(struct task_struct *p) { }
-#endif
 
 extern void proc_caches_init(void);
 extern void flush_signals(struct task_struct *);

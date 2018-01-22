@@ -27,9 +27,13 @@
 #include "mdss_dsi.h"
 #include "mdss_debug.h"
 
+#if defined(CONFIG_FB_MSM_MIPI_HX8389C_QHD_VIDEO_PANEL)
+extern unsigned int lcd_id;
+#endif
+
 static int mdss_dsi_pinctrl_set_state(struct mdss_dsi_ctrl_pdata *ctrl_pdata,
 					bool active);
-
+unsigned int gv_manufacture_id;
 static int mdss_dsi_regulator_init(struct platform_device *pdev)
 {
 	int rc = 0;
@@ -100,20 +104,36 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata, int enable)
 				goto error_enable;
 			}
 		}
+#if !defined(CONFIG_FB_MSM_MIPI_HIMAX_WVGA_VIDEO_PANEL)
+		if (mdss_dsi_pinctrl_set_state(ctrl_pdata, true))
+			pr_debug("reset enable: pinctrl not enabled\n");
+#endif
+#if defined(CONFIG_FB_MSM_MIPI_HX8389C_QHD_VIDEO_PANEL)
+		mdelay(10);
+#endif
+#if defined(CONFIG_FB_MSM_MIPI_S6D2AA0X_HD_VIDEO_PANEL) || defined(CONFIG_FB_MSM_MIPI_HIMAX_WVGA_VIDEO_PANEL)
+	if (gpio_is_valid(ctrl_pdata->disp_en_gpio)) {
+		ret = gpio_request(ctrl_pdata->disp_en_gpio,
+						"disp_enable");
+		if (ret) {
+			pr_err("request disp_en gpio failed, ret=%d\n",
+				       ret);
+		} else {
+			gpio_set_value((ctrl_pdata->disp_en_gpio), 1);
+		}
+	}
+#endif
+		if (ctrl_pdata->panel_extra_power) {
+			ret = ctrl_pdata->panel_extra_power(pdata, enable);
+			if (ret)
+				pr_err("%s : failed to enable extra power\n", __func__);
+		} else
+			pr_err("%s : panel_extra_power is null", __func__);
 
-		/*
-		 * If the panel is already on (as part of the cont splash
-		 * screen feature), then we need to request all the GPIOs that
-		 * have already been configured in the bootloader. This needs
-		 * to be done irresepective of whether the lp11_init flag is
-		 * set or not.
-		 */
-		if (pdata->panel_info.panel_power_on ||
-			!pdata->panel_info.mipi.lp11_init) {
+		if (!pdata->panel_info.mipi.lp11_init) {
 			if (mdss_dsi_pinctrl_set_state(ctrl_pdata, true))
 				pr_debug("reset enable: pinctrl not enabled\n");
-
-			ret = mdss_dsi_panel_reset(pdata, 1);
+			ret = ctrl_pdata->panel_reset(pdata, 1);
 			if (ret) {
 				pr_err("%s: Panel reset failed. rc=%d\n",
 						__func__, ret);
@@ -121,7 +141,7 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata, int enable)
 			}
 		}
 	} else {
-		ret = mdss_dsi_panel_reset(pdata, 0);
+		ret = ctrl_pdata->panel_reset(pdata, 0);
 		if (ret) {
 			pr_err("%s: Panel reset failed. rc=%d\n",
 					__func__, ret);
@@ -129,6 +149,12 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata, int enable)
 		}
 		if (mdss_dsi_pinctrl_set_state(ctrl_pdata, false))
 			pr_debug("reset disable: pinctrl not enabled\n");
+
+		if (ctrl_pdata->panel_extra_power) {
+			ret = ctrl_pdata->panel_extra_power(pdata, enable);
+			if (ret)
+				pr_err("%s : failed to enable extra power\n", __func__);
+		}
 
 		for (i = DSI_MAX_PM - 1; i >= 0; i--) {
 			/*
@@ -390,20 +416,20 @@ static int mdss_dsi_off(struct mdss_panel_data *pdata)
 	if (pdata->panel_info.type == MIPI_CMD_PANEL)
 		mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
 
-	if (!pdata->panel_info.ulps_suspend_enabled) {
-		/* disable DSI controller */
-		mdss_dsi_controller_cfg(0, pdata);
+	/* disable DSI controller */
+	mdss_dsi_controller_cfg(0, pdata);
 
-		/* disable DSI phy */
-		mdss_dsi_phy_disable(ctrl_pdata);
-	}
+	/* disable DSI phy */
+	mdss_dsi_phy_disable(ctrl_pdata);
 
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
 
+	if (!no_panel) {
 	ret = mdss_dsi_panel_power_on(pdata, 0);
 	if (ret) {
 		pr_err("%s: Panel power off failed\n", __func__);
 		return ret;
+		}
 	}
 
 	if (panel_info->dynamic_fps
@@ -416,7 +442,7 @@ static int mdss_dsi_off(struct mdss_panel_data *pdata)
 	return ret;
 }
 
-void mdss_dsi_ctrl_setup(struct mdss_panel_data *pdata)
+static void __mdss_dsi_ctrl_setup(struct mdss_panel_data *pdata)
 {
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 	struct mdss_panel_info *pinfo;
@@ -508,111 +534,14 @@ void mdss_dsi_ctrl_setup(struct mdss_panel_data *pdata)
 	}
 }
 
-int mdss_dsi_clamp_ctrl(struct mdss_dsi_ctrl_pdata *ctrl, int enable)
-{
-	struct mipi_panel_info *mipi = NULL;
-	u32 clamp_reg, regval = 0;
-	u32 clamp_reg_off, phyrst_reg_off;
-
-	if (!ctrl) {
-		pr_err("%s: invalid input\n", __func__);
-		return -EINVAL;
-	}
-
-	if (!ctrl->mmss_misc_io.base) {
-		pr_err("%s: mmss_misc_io not mapped\nn", __func__);
-		return -EINVAL;
-	}
-
-	clamp_reg_off = ctrl->ulps_clamp_ctrl_off;
-	phyrst_reg_off = ctrl->ulps_phyrst_ctrl_off;
-	mipi = &ctrl->panel_data.panel_info.mipi;
-
-	/* clock lane will always be clamped */
-	clamp_reg = BIT(9);
-	if (ctrl->ulps)
-		clamp_reg |= BIT(8);
-	/* make a note of all active data lanes which need to be clamped */
-	if (mipi->data_lane0) {
-		clamp_reg |= BIT(7);
-		if (ctrl->ulps)
-			clamp_reg |= BIT(6);
-	}
-	if (mipi->data_lane1) {
-		clamp_reg |= BIT(5);
-		if (ctrl->ulps)
-			clamp_reg |= BIT(4);
-	}
-	if (mipi->data_lane2) {
-		clamp_reg |= BIT(3);
-		if (ctrl->ulps)
-			clamp_reg |= BIT(2);
-	}
-	if (mipi->data_lane3) {
-		clamp_reg |= BIT(1);
-		if (ctrl->ulps)
-			clamp_reg |= BIT(0);
-	}
-	pr_debug("%s: called for ctrl%d, enable=%d, clamp_reg=0x%08x\n",
-		__func__, ctrl->ndx, enable, clamp_reg);
-	if (enable && !ctrl->mmss_clamp) {
-		/* Enable MMSS DSI Clamps */
-		if (ctrl->ndx == DSI_CTRL_0) {
-			regval = MIPI_INP(ctrl->mmss_misc_io.base +
-				clamp_reg_off);
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval | clamp_reg);
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval | (clamp_reg | BIT(15)));
-		} else if (ctrl->ndx == DSI_CTRL_1) {
-			regval = MIPI_INP(ctrl->mmss_misc_io.base +
-				clamp_reg_off);
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval | (clamp_reg << 16));
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval | ((clamp_reg << 16) | BIT(31)));
-		}
-
-		/*
-		 * This register write ensures that DSI PHY will not be
-		 * reset when mdss ahb clock reset is asserted while coming
-		 * out of power collapse
-		 */
-		MIPI_OUTP(ctrl->mmss_misc_io.base + phyrst_reg_off, 0x1);
-		ctrl->mmss_clamp = true;
-	} else if (!enable && ctrl->mmss_clamp) {
-		MIPI_OUTP(ctrl->mmss_misc_io.base + phyrst_reg_off, 0x0);
-		/* Disable MMSS DSI Clamps */
-		if (ctrl->ndx == DSI_CTRL_0) {
-			regval = MIPI_INP(ctrl->mmss_misc_io.base +
-				clamp_reg_off);
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval & ~(clamp_reg | BIT(15)));
-		} else if (ctrl->ndx == DSI_CTRL_1) {
-			regval = MIPI_INP(ctrl->mmss_misc_io.base +
-				clamp_reg_off);
-			MIPI_OUTP(ctrl->mmss_misc_io.base + clamp_reg_off,
-				regval & ~((clamp_reg << 16) | BIT(31)));
-		}
-		ctrl->mmss_clamp = false;
-	} else {
-		pr_debug("%s: No change requested: %s -> %s\n", __func__,
-			ctrl->mmss_clamp ? "enabled" : "disabled",
-			enable ? "enabled" : "disabled");
-	}
-
-	return 0;
-
-}
-
 int mdss_dsi_ulps_config(struct mdss_dsi_ctrl_pdata *ctrl_pdata, int enable)
 {
 	int ret = 0;
 	struct mdss_panel_data *pdata = NULL;
 	struct mdss_panel_info *pinfo;
 	struct mipi_panel_info *mipi;
-	u32 lane_status = 0;
-	u32 active_lanes = 0;
+	u32 lane_status = 0, regval;
+	u32 active_lanes = 0, clamp_reg;
 
 	if (!ctrl_pdata) {
 		pr_err("%s: invalid input\n", __func__);
@@ -632,9 +561,8 @@ int mdss_dsi_ulps_config(struct mdss_dsi_ctrl_pdata *ctrl_pdata, int enable)
 	pinfo = &pdata->panel_info;
 	mipi = &pinfo->mipi;
 
-	if (!mdss_dsi_ulps_feature_enabled(pdata)
-			&& !pinfo->ulps_suspend_enabled) {
-		pr_err("%s: ULPS feature not supported. enable=%d\n",
+	if (!mdss_dsi_ulps_feature_enabled(pdata)) {
+		pr_debug("%s: ULPS feature not supported. enable=%d\n",
 			__func__, enable);
 		return -ENOTSUPP;
 	}
@@ -652,21 +580,26 @@ int mdss_dsi_ulps_config(struct mdss_dsi_ctrl_pdata *ctrl_pdata, int enable)
 
 	/* clock lane will always be programmed for ulps and will be clamped */
 	active_lanes = BIT(4);
+	clamp_reg = BIT(8) | BIT(9);
 	/*
 	 * make a note of all active data lanes for which ulps entry/exit
 	 * as well as DSI clamps are needed
 	 */
 	if (mipi->data_lane0) {
 		active_lanes |= BIT(0);
+		clamp_reg |= (BIT(0) | BIT(1));
 	}
 	if (mipi->data_lane1) {
 		active_lanes |= BIT(1);
+		clamp_reg |= (BIT(2) | BIT(3));
 	}
 	if (mipi->data_lane2) {
 		active_lanes |= BIT(2);
+		clamp_reg |= (BIT(4) | BIT(5));
 	}
 	if (mipi->data_lane3) {
 		active_lanes |= BIT(3);
+		clamp_reg |= (BIT(6) | BIT(7));
 	}
 
 	pr_debug("%s: configuring ulps (%s) for ctrl%d, active lanes=0x%08x\n",
@@ -690,18 +623,69 @@ int mdss_dsi_ulps_config(struct mdss_dsi_ctrl_pdata *ctrl_pdata, int enable)
 			ret = -EINVAL;
 			goto error;
 		}
+
+		/* Enable MMSS DSI Clamps */
+		if (ctrl_pdata->ndx == DSI_CTRL_0) {
+			regval = MIPI_INP(ctrl_pdata->mmss_misc_io.base + 0x14);
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval | clamp_reg);
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval | (clamp_reg | BIT(15)));
+		} else if (ctrl_pdata->ndx == DSI_CTRL_1) {
+			regval = MIPI_INP(ctrl_pdata->mmss_misc_io.base + 0x14);
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval | (clamp_reg << 16));
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval | ((clamp_reg << 16) | BIT(31)));
+		}
+
+		wmb();
+
+		/*
+		 * This register write ensures that DSI PHY will not be
+		 * reset when mdss ahb clock reset is asserted while coming
+		 * out of power collapse
+		 */
+		MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x108, 0x1);
 		ctrl_pdata->ulps = true;
-	} else if (!enable && ctrl_pdata->ulps) {
-		/*Clearout any phy errors before exiting ULPS*/
-		mdss_dsi_dln0_phy_err(ctrl_pdata);
+	} else if (ctrl_pdata->ulps) {
+		MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x108, 0x0);
+		mdss_dsi_phy_init(pdata);
+
+		__mdss_dsi_ctrl_setup(pdata);
+		mdss_dsi_sw_reset(pdata);
+		mdss_dsi_host_init(pdata);
+		mdss_dsi_op_mode_config(pdata->panel_info.mipi.mode,
+			pdata);
+
+		/*
+		 * ULPS Entry Request. This is needed because, after power
+		 * collapse and reset, the DSI controller resets back to
+		 * idle state and not ULPS.
+		 * Wait for a short duration to ensure that the lanes
+		 * enter ULP state.
+		 */
+		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x0AC, active_lanes);
+		usleep(100);
+
+		/* Disable MMSS DSI Clamps */
+		if (ctrl_pdata->ndx == DSI_CTRL_0) {
+			regval = MIPI_INP(ctrl_pdata->mmss_misc_io.base + 0x14);
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval & ~(clamp_reg | BIT(15)));
+		} else if (ctrl_pdata->ndx == DSI_CTRL_1) {
+			regval = MIPI_INP(ctrl_pdata->mmss_misc_io.base + 0x14);
+			MIPI_OUTP(ctrl_pdata->mmss_misc_io.base + 0x14,
+				regval & ~((clamp_reg << 16) | BIT(31)));
+		}
+
+
 		/*
 		 * ULPS Exit Request
 		 * Hardware requirement is to wait for at least 1ms
 		 */
 		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x0AC, active_lanes << 8);
 		usleep(1000);
-		/*Force lanes to stop state*/
-		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x0AC, active_lanes << 16);
 		MIPI_OUTP(ctrl_pdata->ctrl_base + 0x0AC, 0x0);
 
 		/*
@@ -759,6 +743,7 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 		return -EINVAL;
 	}
 
+
 	if (pdata->panel_info.panel_power_on) {
 		pr_warn("%s:%d Panel already on.\n", __func__, __LINE__);
 		return 0;
@@ -773,56 +758,56 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 	pinfo = &pdata->panel_info;
 	mipi = &pdata->panel_info.mipi;
 
+	if (!no_panel) {
 	ret = mdss_dsi_panel_power_on(pdata, 1);
 	if (ret) {
-		pr_err("%s:Panel power on failed. rc=%d\n",
-						__func__, ret);
+		pr_err("%s:Panel power on failed. rc=%d\n", __func__, ret);
 		return ret;
 	}
-
-	if (!pinfo->ulps_suspend_enabled) {
-		mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 1);
+	}
+	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 1);
+	if (ret) {
+		pr_err("%s: failed to enable bus clocks. rc=%d\n", __func__,
+			ret);
+		ret = mdss_dsi_panel_power_on(pdata, 0);
 		if (ret) {
-			pr_err("%s: failed to enable bus clocks. rc=%d\n",
+			pr_err("%s: Panel reset failed. rc=%d\n",
 					__func__, ret);
-			ret = mdss_dsi_panel_power_on(pdata, 0);
-			if (ret) {
-				pr_err("%s: Panel reset failed. rc=%d\n",
-					__func__, ret);
-				return ret;
-			}
-			pdata->panel_info.panel_power_on = 0;
 			return ret;
 		}
-		mdss_dsi_phy_sw_reset((ctrl_pdata->ctrl_base));
-		mdss_dsi_phy_init(pdata);
-		mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 0);
+		pdata->panel_info.panel_power_on = 0;
+		return ret;
 	}
+	pdata->panel_info.panel_power_on = 1;
+
+	mdss_dsi_phy_sw_reset((ctrl_pdata->ctrl_base));
+	mdss_dsi_phy_init(pdata);
+	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 0);
+
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
 
-	if (!pinfo->ulps_suspend_enabled) {
-		mdss_dsi_ctrl_setup(pdata);
-		mdss_dsi_sw_reset(pdata, false);
-		mdss_dsi_host_init(pdata);
-	} else {
-		/*After ULPS exit do DSI reset once*/
-		pr_debug("%s: ULPS during suspend\n", __func__);
-		mdss_dsi_sw_reset(pdata, true);
-	}
+	__mdss_dsi_ctrl_setup(pdata);
+	mdss_dsi_sw_reset(pdata);
+	mdss_dsi_host_init(pdata);
 
 	/*
 	 * Issue hardware reset line after enabling the DSI clocks and data
 	 * data lanes for LP11 init
 	 */
 	if (mipi->lp11_init) {
-		if (mdss_dsi_pinctrl_set_state(ctrl_pdata, true))
-			pr_debug("reset enable: pinctrl not enabled\n");
-		mdss_dsi_panel_reset(pdata, 1);
-	}
-	pdata->panel_info.panel_power_on = 1;
+		u32 tmp;
 
-	if (mipi->init_delay)
-		usleep(mipi->init_delay);
+		tmp = MIPI_INP((ctrl_pdata->ctrl_base) + 0xac);
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0xac, 0x1F << 16);
+		wmb();
+#if defined(CONFIG_FB_MSM_MIPI_HIMAX_WVGA_VIDEO_PANEL) || defined(CONFIG_FB_MSM_MIPI_HX8389C_QHD_VIDEO_PANEL) 
+		mdelay(5);
+#endif
+		ctrl_pdata->panel_reset(pdata, 1);
+		if (mipi->init_delay)
+			usleep(mipi->init_delay);
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0xac, tmp);
+	}
 
 	if (mipi->force_clk_lane_hs) {
 		u32 tmp;
@@ -956,7 +941,7 @@ static int mdss_dsi_blank(struct mdss_panel_data *pdata)
 
 	if (pdata->panel_info.type == MIPI_VIDEO_PANEL &&
 			ctrl_pdata->off_cmds.link_state == DSI_LP_MODE) {
-		mdss_dsi_sw_reset(pdata, false);
+		mdss_dsi_sw_reset(pdata);
 		mdss_dsi_host_init(pdata);
 	}
 
@@ -1018,7 +1003,7 @@ int mdss_dsi_cont_splash_on(struct mdss_panel_data *pdata)
 	WARN((ctrl_pdata->ctrl_state & CTRL_STATE_PANEL_INIT),
 		"Incorrect Ctrl state=0x%x\n", ctrl_pdata->ctrl_state);
 
-	mdss_dsi_sw_reset(pdata, false);
+	mdss_dsi_sw_reset(pdata);
 	mdss_dsi_host_init(pdata);
 	mdss_dsi_op_mode_config(mipi->mode, pdata);
 	pr_debug("%s-:End\n", __func__);
@@ -1223,15 +1208,6 @@ static int mdss_dsi_ctl_partial_update(struct mdss_panel_data *pdata)
 	return rc;
 }
 
-int mdss_dsi_register_recovery_handler(struct mdss_dsi_ctrl_pdata *ctrl,
-	struct mdss_intf_recovery *recovery)
-{
-	mutex_lock(&ctrl->mutex);
-	ctrl->recovery = recovery;
-	mutex_unlock(&ctrl->mutex);
-	return 0;
-}
-
 static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 				  int event, void *arg)
 {
@@ -1281,6 +1257,7 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 		mdss_dsi_clk_req(ctrl_pdata, (int) (unsigned long) arg);
 		break;
 	case MDSS_EVENT_DSI_CMDLIST_KOFF:
+		ctrl_pdata->recovery = (struct mdss_panel_recovery *)arg;
 		mdss_dsi_cmdlist_commit(ctrl_pdata, 1);
 		break;
 	case MDSS_EVENT_PANEL_UPDATE_FPS:
@@ -1304,12 +1281,17 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 		rc = mdss_dsi_update_panel_config(ctrl_pdata,
 					(int)(unsigned long) arg);
 		break;
-	case MDSS_EVENT_REGISTER_RECOVERY_HANDLER:
-		rc = mdss_dsi_register_recovery_handler(ctrl_pdata,
-			(struct mdss_intf_recovery *)arg);
+	case MDSS_EVENT_FB_REGISTERED:
+		if (ctrl_pdata->registered) {
+			pr_debug("%s : event=%d, calling panel registered callback\n", __func__, event);
+			rc = ctrl_pdata->registered(pdata);
+		}
 		break;
 	default:
-		pr_debug("%s: unhandled event=%d\n", __func__, event);
+		if (ctrl_pdata->event_handler)
+			rc = ctrl_pdata->event_handler(pdata, event);
+		else
+			pr_debug("%s: unhandled event=%d\n", __func__, event);
 		break;
 	}
 	pr_debug("%s-:event=%d, rc=%d\n", __func__, event, rc);
@@ -1642,6 +1624,11 @@ int dsi_panel_device_register(struct device_node *pan_node,
 	struct platform_device *ctrl_pdev = NULL;
 	bool dynamic_fps;
 	const char *data;
+	const char panel_extra_power_gpio [3][40] = {
+			"qcom,platform-panel-extra-power-gpio1",
+			"qcom,platform-panel-extra-power-gpio2",
+			"qcom,platform-panel-extra-power-gpio3"};
+
 
 	mipi  = &(pinfo->mipi);
 
@@ -1720,20 +1707,6 @@ int dsi_panel_device_register(struct device_node *pan_node,
 			data[i];
 	}
 
-	rc = of_property_read_u32(ctrl_pdev->dev.of_node,
-			"qcom,mmss-ulp-clamp-ctrl-offset",
-			&ctrl_pdata->ulps_clamp_ctrl_off);
-	if (!rc) {
-		rc = of_property_read_u32(ctrl_pdev->dev.of_node,
-				"qcom,mmss-phyreset-ctrl-offset",
-				&ctrl_pdata->ulps_phyrst_ctrl_off);
-	}
-	if (rc && pinfo->ulps_feature_enabled) {
-		pr_err("%s: dsi ulps clamp register settings missing\n",
-				__func__);
-		return -EINVAL;
-	}
-
 	ctrl_pdata->shared_pdata.broadcast_enable = of_property_read_bool(
 		pan_node, "qcom,mdss-dsi-panel-broadcast-mode");
 
@@ -1788,6 +1761,17 @@ int dsi_panel_device_register(struct device_node *pan_node,
 		pr_err("%s:%d, Disp_en gpio not specified\n",
 						__func__, __LINE__);
 
+	for (i = 0; i < MAX_EXTRA_POWER_GPIO; i++) {
+		ctrl_pdata->panel_extra_power_gpio[i] =
+				 of_get_named_gpio(ctrl_pdev->dev.of_node,
+						panel_extra_power_gpio[i], 0);
+		if (!gpio_is_valid(ctrl_pdata->panel_extra_power_gpio[i]))
+			pr_err("%s:%d, panel_extra_power gpio%d not specified\n",
+							__func__, __LINE__, i+1);
+		else
+			pr_err("extra gpio num : %d\n", ctrl_pdata->panel_extra_power_gpio[i]);
+	}
+
 	ctrl_pdata->bklt_en_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 		"qcom,platform-bklight-en-gpio", 0);
 	if (!gpio_is_valid(ctrl_pdata->bklt_en_gpio))
@@ -1811,6 +1795,13 @@ int dsi_panel_device_register(struct device_node *pan_node,
 		ctrl_pdata->mode_gpio = -EINVAL;
 	}
 
+	if (ctrl_pdata->panel_gpio_request){
+		rc = ctrl_pdata->panel_gpio_request(ctrl_pdata);
+		if (rc) {
+			pr_err("gpio request failed\n");
+			return rc;
+		}
+	}
 	if (mdss_dsi_clk_init(ctrl_pdev, ctrl_pdata)) {
 		pr_err("%s: unable to initialize Dsi ctrl clks\n", __func__);
 		return -EPERM;
@@ -1850,21 +1841,6 @@ int dsi_panel_device_register(struct device_node *pan_node,
 
 	ctrl_pdata->ctrl_state = CTRL_STATE_UNKNOWN;
 
-	if (pinfo->ulps_suspend_enabled) {
-		/*If ULPS during suspend flag is set, then always put an extra
-		* vote on the dsi controller regulator supply so that it never gets
-		* disabled during suspend/resume cycles.
-		*/
-		rc = msm_dss_enable_vreg(
-			ctrl_pdata->power_data[DSI_CTRL_PM].vreg_config,
-			ctrl_pdata->power_data[DSI_CTRL_PM].num_vreg, 1);
-		if (rc) {
-			pr_err("%s: failed to enable vregs for %s\n",
-				__func__, __mdss_dsi_pm_name(DSI_CTRL_PM));
-			return rc;
-		}
-	}
-
 	if (pinfo->cont_splash_enabled) {
 		pinfo->panel_power_on = 1;
 		rc = mdss_dsi_panel_power_on(&(ctrl_pdata->panel_data), 1);
@@ -1901,6 +1877,14 @@ int dsi_panel_device_register(struct device_node *pan_node,
 	}
 
 	pr_debug("%s: Panel data initialized\n", __func__);
+	if (no_panel) {
+		rc = mdss_dsi_panel_power_on(&(ctrl_pdata->panel_data), 0);
+		if (rc) {
+			pr_err("%s: Panel power on failed\n", __func__);
+			return rc;
+		}
+		pr_err("%s: LCD not connected!\n",__func__);
+	}
 	return 0;
 }
 
@@ -1944,6 +1928,20 @@ static void __exit mdss_dsi_driver_cleanup(void)
 	platform_driver_unregister(&mdss_dsi_ctrl_driver);
 }
 module_exit(mdss_dsi_driver_cleanup);
+
+
+int get_lcd_attached(void)
+{
+
+#if defined(CONFIG_FB_MSM_MIPI_HIMAX_WVGA_VIDEO_PANEL) \
+	|| defined(CONFIG_FB_MSM_MIPI_S6D2AA0X_HD_VIDEO_PANEL) \
+	|| defined(CONFIG_FB_MSM_MIPI_HX8389C_QHD_VIDEO_PANEL)
+	return ((!gv_manufacture_id)? 0:1);
+#else
+	return 1;
+#endif
+}
+EXPORT_SYMBOL(get_lcd_attached);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DSI controller driver");

@@ -16,6 +16,7 @@
 
 #include <linux/platform_device.h>
 #include <linux/types.h>
+#include <linux/lcd.h>
 
 /* panel id type */
 struct panel_id {
@@ -27,6 +28,7 @@ struct panel_id {
 #define DEFAULT_ROTATOR_FRAME_RATE 120
 #define MDSS_DSI_RST_SEQ_LEN	10
 #define MDSS_MDP_MAX_FETCH 12
+#define MAX_PANEL_NAME_SIZE 100
 
 /* panel type list */
 #define NO_PANEL		0xffff	/* No Panel */
@@ -94,11 +96,8 @@ struct mdss_panel_cfg {
 	bool init_done;
 };
 
-#define MDP_INTF_DSI_CMD_FIFO_UNDERFLOW		0x0001
-#define MDP_INTF_DSI_VIDEO_FIFO_OVERFLOW	0x0002
-
-struct mdss_intf_recovery {
-	void (*fxn)(void *ctx, int event);
+struct mdss_panel_recovery {
+	void (*fxn)(void *ctx);
 	void *data;
 };
 
@@ -143,8 +142,6 @@ struct mdss_intf_recovery {
  *				based on the dsi mode passed as argument.
  *				- 0: update to video mode
  *				- 1: update to command mode
- * @MDSS_EVENT_REGISTER_RECOVERY_HANDLER: Event to recover the interface in
- *					case there was any errors detected.
  */
 enum mdss_intf_events {
 	MDSS_EVENT_RESET = 1,
@@ -164,7 +161,10 @@ enum mdss_intf_events {
 	MDSS_EVENT_DSI_CMDLIST_KOFF,
 	MDSS_EVENT_ENABLE_PARTIAL_UPDATE,
 	MDSS_EVENT_DSI_DYNAMIC_SWITCH,
-	MDSS_EVENT_REGISTER_RECOVERY_HANDLER,
+	MDSS_EVENT_FRAME_UPDATE,
+#if defined(CONFIG_MDNIE_TFT_MSM8X16)
+	MDSS_EVENT_MDNIE_DEFAULT_UPDATE,
+#endif
 };
 
 struct lcd_panel_info {
@@ -336,7 +336,6 @@ struct mdss_panel_info {
 	int pwm_period;
 	bool dynamic_fps;
 	bool ulps_feature_enabled;
-	bool ulps_suspend_enabled;
 	bool esd_check_enabled;
 	char dfps_update;
 	int new_fps;
@@ -370,10 +369,59 @@ struct mdss_panel_info {
 	struct edp_panel_info edp;
 };
 
+struct display_status {
+	unsigned char acl_on;
+	unsigned char curr_acl_cond;
+	unsigned char is_smart_dim_loaded;
+	unsigned char is_panel_read_done;
+	unsigned char is_mdnie_loaded;
+	unsigned char auto_brightness;
+	unsigned char recovery_boot_mode;
+	unsigned char on;
+	unsigned char wait_disp_on;
+	int curr_elvss_idx;
+	int curr_acl_idx;
+	int curr_opr_idx;
+	int curr_aid_idx;
+	int curr_gamma_idx;
+	int bright_level;
+	int recent_bright_level;
+
+	int temperature;
+	char temperature_value;
+	int elvss_need_update;
+	int siop_status;
+	int hbm_mode;
+	char elvss_value;
+};
+
+struct mipi_samsung_driver_data {
+	struct display_status dstat;
+	struct msm_fb_data_type *mfd;
+	struct mdss_panel_data *pdata;
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata;
+	struct mutex lock;
+
+#if defined(CONFIG_HAS_EARLYSUSPEND)
+	struct early_suspend early_suspend;
+#endif
+	char panel_name[MAX_PANEL_NAME_SIZE];
+	int panel;
+	unsigned int manufacture_id;
+	unsigned int manufacture_date;
+	char ddi_id[5];
+	unsigned int id3;
+	struct smartdim_conf *sdimconf;
+	struct lcd_device *lcd_device;
+	void *mdss_panel_data;
+	void *mdss_dsi_ctrl_pdata;
+};
+
 struct mdss_panel_data {
 	struct mdss_panel_info panel_info;
 	void (*set_backlight) (struct mdss_panel_data *pdata, u32 bl_level);
 	unsigned char *mmss_cc_base;
+	struct mipi_samsung_driver_data samsung_pdata;
 
 	/**
 	 * event_handler() - callback handler for MDP core events
@@ -484,6 +532,33 @@ static inline int mdss_panel_get_htotal(struct mdss_panel_info *pinfo, bool
 		pinfo->lcdc.h_pulse_width;
 }
 
+/**
+ * mdss_mdp_max_fetch_lines: - Number of fetch lines in vertical front porch
+ * @pinfo:	Pointer to panel info containing all panel information
+ *
+ * Returns the number of fetch lines in vertical front porch at which mdp
+ * can start fetching the next frame.
+ *
+ * In some cases, vertical front porch is too high. In such cases limit
+ * the mdp fetch lines  as the last 12 lines of vertical front porch.
+ */
+static inline int mdss_mdp_max_fetch_lines(struct mdss_panel_info *pinfo)
+{
+	int fetch_lines;
+	int v_total, vfp_start;
+
+	v_total = mdss_panel_get_vtotal(pinfo);
+	vfp_start = (pinfo->lcdc.v_back_porch + pinfo->lcdc.v_pulse_width +
+			pinfo->yres);
+
+	fetch_lines = v_total - vfp_start;
+
+	if (fetch_lines > MDSS_MDP_MAX_FETCH)
+		fetch_lines = MDSS_MDP_MAX_FETCH;
+
+	return fetch_lines;
+}
+
 int mdss_register_panel(struct platform_device *pdev,
 	struct mdss_panel_data *pdata);
 
@@ -519,4 +594,5 @@ int mdss_panel_get_boot_cfg(void);
  * returns true if mdss is ready, else returns false.
  */
 bool mdss_is_ready(void);
+extern bool no_panel;
 #endif /* MDSS_PANEL_H */

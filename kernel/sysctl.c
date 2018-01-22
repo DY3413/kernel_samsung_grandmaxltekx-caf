@@ -131,6 +131,9 @@ static int __maybe_unused two = 2;
 static int __maybe_unused three = 3;
 static unsigned long one_ul = 1;
 static int one_hundred = 100;
+#ifdef CONFIG_INCREASE_MAXIMUM_SWAPPINESS
+static int max_swappiness = 200;
+#endif
 #ifdef CONFIG_PRINTK
 static int ten_thousand = 10000;
 #endif
@@ -307,32 +310,25 @@ static struct ctl_table kern_table[] = {
 #endif
 #if defined(CONFIG_SCHED_FREQ_INPUT) || defined(CONFIG_SCHED_HMP)
 	{
-		.procname       = "sched_freq_legacy_mode",
-		.data           = &sysctl_sched_freq_legacy_mode,
-		.maxlen         = sizeof(unsigned int),
-		.mode           = 0644,
-		.proc_handler   = sched_window_update_handler,
-	},
-	{
 		.procname       = "sched_account_wait_time",
 		.data           = &sysctl_sched_account_wait_time,
 		.maxlen         = sizeof(unsigned int),
 		.mode           = 0644,
-		.proc_handler   = sched_window_update_handler,
+		.proc_handler   = sched_acct_wait_time_update_handler,
 	},
 	{
 		.procname       = "sched_ravg_hist_size",
 		.data           = &sysctl_sched_ravg_hist_size,
 		.maxlen         = sizeof(unsigned int),
 		.mode           = 0644,
-		.proc_handler   = sched_window_update_handler,
+		.proc_handler   = sched_ravg_hist_size_update_handler,
 	},
 	{
 		.procname       = "sched_window_stats_policy",
 		.data           = &sysctl_sched_window_stats_policy,
 		.maxlen         = sizeof(unsigned int),
 		.mode           = 0644,
-		.proc_handler   = sched_window_update_handler,
+		.proc_handler   = sched_window_stats_policy_update_handler,
 	},
 	{
 		.procname	= "sched_wakeup_load_threshold",
@@ -349,6 +345,20 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= sched_hmp_proc_update_handler,
+	},
+	{
+		.procname	= "sched_mostly_idle_load",
+		.data		= &sysctl_sched_mostly_idle_load_pct,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sched_hmp_proc_update_handler,
+	},
+	{
+		.procname	= "sched_mostly_idle_nr_run",
+		.data		= &sysctl_sched_mostly_idle_nr_run,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
 	},
 	{
 		.procname	= "sched_spill_load",
@@ -381,13 +391,6 @@ static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_upmigrate_min_nice",
 		.data		= &sysctl_sched_upmigrate_min_nice,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{
-		.procname	= "sched_prefer_idle",
-		.data		= &sysctl_sched_prefer_idle,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
@@ -1330,7 +1333,11 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
+#ifdef CONFIG_INCREASE_MAXIMUM_SWAPPINESS
+		.extra2		= &max_swappiness,
+#else
 		.extra2		= &one_hundred,
+#endif
 	},
 #ifdef CONFIG_HUGETLB_PAGE
 	{

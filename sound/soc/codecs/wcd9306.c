@@ -5943,7 +5943,7 @@ static struct regulator *tapan_codec_find_regulator(
 	}
 	core = dev_get_drvdata(codec->dev->parent);
 	if (core == NULL) {
-		dev_err(codec->dev, "%s: core not initialized\n", __func__);
+		pr_err("%s: core not initialized\n", __func__);
 		return NULL;
 	}
 

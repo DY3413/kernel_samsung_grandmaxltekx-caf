@@ -338,12 +338,14 @@ static ssize_t mdss_debug_factor_write(struct file *file,
 		    const char __user *user_buf, size_t count, loff_t *ppos)
 {
 	struct mdss_fudge_factor *factor  = file->private_data;
-	u32 numer = factor->numer;
-	u32 denom = factor->denom;
+	u32 numer, denom;
 	char buf[32];
 
 	if (!factor)
 		return -ENODEV;
+
+	numer = factor->numer;
+	denom = factor->denom;
 
 	if (count >= sizeof(buf))
 		return -EFAULT;
@@ -443,9 +445,6 @@ static int mdss_debugfs_perf_init(struct mdss_debug_data *mdd,
 
 	debugfs_create_file("ib_factor_overlap", 0644, mdd->perf,
 		&mdata->ib_factor_overlap, &mdss_factor_fops);
-
-	debugfs_create_file("ib_factor_cmd", 0644, mdd->perf,
-		&mdata->ib_factor_cmd, &mdss_factor_fops);
 
 	debugfs_create_file("clk_factor", 0644, mdd->perf,
 		&mdata->clk_factor, &mdss_factor_fops);

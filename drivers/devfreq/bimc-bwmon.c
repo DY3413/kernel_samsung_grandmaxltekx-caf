@@ -98,22 +98,13 @@ static void mon_irq_disable(struct bwmon *m)
 
 static int mon_irq_status(struct bwmon *m)
 {
-	u32 mval, gval;
-
-	mval = readl_relaxed(MON_INT_STATUS(m)),
-	gval = readl_relaxed(GLB_INT_STATUS(m));
-
-	dev_dbg(m->dev, "IRQ status p:%x, g:%x\n", mval, gval);
-
-	return mval & 0x1;
+	return readl_relaxed(MON_INT_STATUS(m)) & 0x1;
 }
 
 static void mon_irq_clear(struct bwmon *m)
 {
-	writel_relaxed(0x1, MON_INT_CLR(m));
-	mb();
 	writel_relaxed(1 << m->mport, GLB_INT_CLR(m));
-	mb();
+	writel_relaxed(0x1, MON_INT_CLR(m));
 }
 
 static void mon_set_limit(struct bwmon *m, u32 count)
@@ -127,15 +118,14 @@ static u32 mon_get_limit(struct bwmon *m)
 	return readl_relaxed(MON_THRES(m));
 }
 
-static unsigned long mon_get_count(struct bwmon *m)
+static long mon_get_count(struct bwmon *m)
 {
-	unsigned long count;
+	long count;
 
 	count = readl_relaxed(MON_CNT(m));
-	dev_dbg(m->dev, "Counter: %08lx\n", count);
 	if (mon_irq_status(m))
 		count += mon_get_limit(m);
-	dev_dbg(m->dev, "Actual Count: %08lx\n", count);
+	dev_dbg(m->dev, "Count: %ld\n", count);
 
 	return count;
 }
@@ -173,11 +163,8 @@ static unsigned long meas_bw_and_set_irq(struct bw_hwmon *hw,
 
 	mbps = mon_get_count(m);
 	mbps = bytes_to_mbps(mbps, us);
-	/*
-	 * The fudging of mbps when calculating limit is to workaround a HW
-	 * design issue. Needs further tuning.
-	 */
-	limit = mbps_to_bytes(max(mbps, 400UL), sample_ms, tol);
+	/* + 1024 is to workaround HW design issue. Needs further tuning. */
+	limit = mbps_to_bytes(mbps + 1024, sample_ms, tol);
 	mon_set_limit(m, limit);
 
 	mon_clear(m);
@@ -209,8 +196,7 @@ static int start_bw_hwmon(struct bw_hwmon *hw, unsigned long mbps)
 				  IRQF_ONESHOT | IRQF_SHARED,
 				  dev_name(m->dev), m);
 	if (ret) {
-		dev_err(m->dev, "Unable to register interrupt handler! (%d)\n",
-				ret);
+		dev_err(m->dev, "Unable to register interrupt handler!\n");
 		return ret;
 	}
 
@@ -235,32 +221,8 @@ static void stop_bw_hwmon(struct bw_hwmon *hw)
 	free_irq(m->irq, m);
 	mon_disable(m);
 	mon_irq_disable(m);
-	mon_clear(m);
 	mon_irq_clear(m);
-}
-
-static int suspend_bw_hwmon(struct bw_hwmon *hw)
-{
-	struct bwmon *m = to_bwmon(hw);
-
-	disable_irq(m->irq);
-	mon_disable(m);
-	mon_irq_disable(m);
-	mon_irq_clear(m);
-
-	return 0;
-}
-
-static int resume_bw_hwmon(struct bw_hwmon *hw)
-{
-	struct bwmon *m = to_bwmon(hw);
-
 	mon_clear(m);
-	mon_irq_enable(m);
-	mon_enable(m);
-	enable_irq(m->irq);
-
-	return 0;
 }
 
 /*************************************************************************/
@@ -318,8 +280,6 @@ static int bimc_bwmon_driver_probe(struct platform_device *pdev)
 		return -EINVAL;
 	m->hw.start_hwmon = &start_bw_hwmon,
 	m->hw.stop_hwmon = &stop_bw_hwmon,
-	m->hw.suspend_hwmon = &suspend_bw_hwmon,
-	m->hw.resume_hwmon = &resume_bw_hwmon,
 	m->hw.meas_bw_and_set_irq = &meas_bw_and_set_irq,
 
 	ret = register_bw_hwmon(dev, &m->hw);

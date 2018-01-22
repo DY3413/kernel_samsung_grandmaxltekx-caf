@@ -46,9 +46,6 @@
 
 #define MAX_TUNING_LOOP 40
 
-#define SDHCI_DBG_DUMP_RS_INTERVAL (10 * HZ)
-#define SDHCI_DBG_DUMP_RS_BURST 2
-
 static unsigned int debug_quirks = 0;
 static unsigned int debug_quirks2;
 
@@ -101,6 +98,11 @@ static void sdhci_dump_state(struct sdhci_host *host)
 		mmc_hostname(mmc), host->clock, mmc->clk_gated,
 		mmc->claimer->comm, host->pwr);
 	sdhci_dump_rpm_info(host);
+	if (mmc->card) {
+		pr_info("%s: card->cid : %08x%08x%08x%08x\n", mmc_hostname(mmc), 
+				mmc->card->raw_cid[0], mmc->card->raw_cid[1], 
+				mmc->card->raw_cid[2], mmc->card->raw_cid[3]);
+	}
 }
 
 static void sdhci_dumpregs(struct sdhci_host *host)
@@ -690,11 +692,9 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 
 		BUG_ON(len > 65536);
 
-		if (len) {
-			/* tran, valid */
-			sdhci_set_adma_desc(host, desc, addr, len, 0x21);
-			desc += host->adma_desc_line_sz;
-		}
+		/* tran, valid */
+		sdhci_set_adma_desc(host, desc, addr, len, 0x21);
+		desc += host->adma_desc_line_sz;
 
 		/*
 		 * If this triggers then we have a calculation bug
@@ -882,17 +882,6 @@ static void sdhci_set_transfer_irqs(struct sdhci_host *host)
 		sdhci_clear_set_irqs(host, dma_irqs, pio_irqs);
 }
 
-static void sdhci_set_blk_size_reg(struct sdhci_host *host, unsigned int blksz,
-				   unsigned int sdma_boundary)
-{
-	if (host->flags & SDHCI_USE_ADMA)
-		sdhci_writew(host, SDHCI_MAKE_BLKSZ(0, blksz),
-			     SDHCI_BLOCK_SIZE);
-	else
-		sdhci_writew(host, SDHCI_MAKE_BLKSZ(sdma_boundary, blksz),
-			     SDHCI_BLOCK_SIZE);
-}
-
 static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 {
 	u8 count;
@@ -1064,7 +1053,8 @@ static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 	sdhci_set_transfer_irqs(host);
 
 	/* Set the DMA boundary value and block size */
-	sdhci_set_blk_size_reg(host, data->blksz, SDHCI_DEFAULT_BOUNDARY_ARG);
+	sdhci_writew(host, SDHCI_MAKE_BLKSZ(SDHCI_DEFAULT_BOUNDARY_ARG,
+		data->blksz), SDHCI_BLOCK_SIZE);
 	sdhci_writew(host, data->blocks, SDHCI_BLOCK_COUNT);
 }
 
@@ -2412,11 +2402,14 @@ static int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode)
 		if ((cmd.opcode == MMC_SEND_TUNING_BLOCK_HS400) ||
 		    (cmd.opcode == MMC_SEND_TUNING_BLOCK_HS200)) {
 			if (mmc->ios.bus_width == MMC_BUS_WIDTH_8)
-				sdhci_set_blk_size_reg(host, 128, 7);
+				sdhci_writew(host, SDHCI_MAKE_BLKSZ(7, 128),
+					     SDHCI_BLOCK_SIZE);
 			else if (mmc->ios.bus_width == MMC_BUS_WIDTH_4)
-				sdhci_set_blk_size_reg(host, 64, 7);
+				sdhci_writew(host, SDHCI_MAKE_BLKSZ(7, 64),
+					     SDHCI_BLOCK_SIZE);
 		} else {
-			sdhci_set_blk_size_reg(host, 64, 7);
+			sdhci_writew(host, SDHCI_MAKE_BLKSZ(7, 64),
+				     SDHCI_BLOCK_SIZE);
 		}
 
 		/*
@@ -2803,7 +2796,7 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 
 	if (intmask & SDHCI_INT_AUTO_CMD_ERR) {
 		auto_cmd_status = host->auto_cmd_err_sts;
-		pr_err_ratelimited("%s: %s: AUTO CMD err sts 0x%08x\n",
+		pr_err("%s: %s: AUTO CMD err sts 0x%08x\n",
 			mmc_hostname(host->mmc), __func__, auto_cmd_status);
 		if (auto_cmd_status & (SDHCI_AUTO_CMD12_NOT_EXEC |
 				       SDHCI_AUTO_CMD_INDEX_ERR |
@@ -2956,7 +2949,7 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		} else {
 			pr_msg = true;
 		}
-		if (pr_msg && __ratelimit(&host->dbg_dump_rs)) {
+		if (pr_msg) {
 			pr_err("%s: data txfr (0x%08x) error: %d after %lld ms\n",
 			       mmc_hostname(host->mmc), intmask,
 			       host->data->error, ktime_to_ms(ktime_sub(
@@ -3385,8 +3378,6 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 
 	spin_lock_init(&host->lock);
 	mutex_init(&host->ios_mutex);
-	ratelimit_state_init(&host->dbg_dump_rs, SDHCI_DBG_DUMP_RS_INTERVAL,
-			SDHCI_DBG_DUMP_RS_BURST);
 
 	return host;
 }

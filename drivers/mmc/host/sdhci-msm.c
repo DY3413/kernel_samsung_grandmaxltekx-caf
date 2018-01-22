@@ -103,9 +103,6 @@ enum sdc_mpm_pin_state {
 #define CORE_HC_SELECT_IN_HS400	(6 << 19)
 #define CORE_HC_SELECT_IN_MASK	(7 << 19)
 
-#define CORE_VENDOR_SPEC_FUNC2 0x110
-#define CORE_ONE_MID_EN     (1 << 25)
-
 #define CORE_VENDOR_SPEC_CAPABILITIES0	0x11C
 #define CORE_8_BIT_SUPPORT		(1 << 18)
 #define CORE_3_3V_SUPPORT		(1 << 24)
@@ -2746,8 +2743,6 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC),
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_ADMA_ERR_ADDR0),
 		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_ADMA_ERR_ADDR1));
-	pr_info("Vndr func2: 0x%08x\n",
-		readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2));
 
 	/*
 	 * tbsel indicates [2:0] bits and tbsel2 indicates [7:4] bits
@@ -2832,7 +2827,6 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 	u32 version, caps;
 	u16 minor;
 	u8 major;
-	u32 val;
 
 	version = readl_relaxed(msm_host->core_mem + CORE_MCI_VERSION);
 	major = (version & CORE_VERSION_MAJOR_MASK) >>
@@ -2852,17 +2846,47 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 			(readl_relaxed(host->ioaddr + SDHCI_CAPABILITIES) |
 			caps), host->ioaddr + CORE_VENDOR_SPEC_CAPABILITIES0);
 	}
-
-	/*
-	 * Enable one MID mode for SDCC5 (major 1) on 8916/8939 (minor 0x2e) and
-	 * on 8992 (minor 0x3e) as a workaround to reset for data stuck issue.
-	 */
-	if (major == 1 && (minor == 0x2e || minor == 0x3e)) {
-		val = readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
-		writel_relaxed((val | CORE_ONE_MID_EN),
-			host->ioaddr + CORE_VENDOR_SPEC_FUNC2);
-	}
 }
+
+/* SYSFS about SD Card Detection */
+extern struct class *sec_class;
+static struct device *t_flash_detect_dev;
+
+static ssize_t t_flash_detect_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct sdhci_msm_host *msm_host = dev_get_drvdata(dev);
+#if	defined(CONFIG_NO_DETECT_PIN)|| defined(CONFIG_SEC_HYBRID_TRAY)
+	if (msm_host->mmc->card) {
+		printk(KERN_DEBUG "sdcc2: card inserted.\n");
+		return sprintf(buf, "Insert\n");
+	} else {
+		printk(KERN_DEBUG "sdcc2: card removed.\n");
+		return sprintf(buf, "Remove\n");
+	}
+#else
+	unsigned int detect;
+
+	if (gpio_is_valid(msm_host->pdata->status_gpio))
+		detect = gpio_get_value(msm_host->pdata->status_gpio);
+
+	else {
+		pr_info("%s : External  SD detect pin Error\n", __func__);
+		return sprintf(buf, "Error\n");
+	}
+
+	pr_info("%s : detect = %d.\n", __func__, detect);
+	if (!detect) {
+		printk(KERN_DEBUG "SD card inserted.\n");
+		return sprintf(buf, "Insert\n");
+	} else {
+		printk(KERN_DEBUG "SD card removed.\n");
+		return sprintf(buf, "Remove\n");
+	}
+#endif
+}
+
+static DEVICE_ATTR(status, 0444, t_flash_detect_show, NULL);
 
 static int sdhci_msm_probe(struct platform_device *pdev)
 {
@@ -3120,18 +3144,19 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps |= msm_host->pdata->mmc_bus_width;
 	msm_host->mmc->caps |= msm_host->pdata->caps;
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
-	msm_host->mmc->caps2 |= MMC_CAP2_CORE_RUNTIME_PM;
-	msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR;
-	msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR_CONTROL;
+	//msm_host->mmc->caps2 |= MMC_CAP2_CORE_RUNTIME_PM;
+	//msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR;
+	//msm_host->mmc->caps2 |= MMC_CAP2_PACKED_WR_CONTROL;
 	msm_host->mmc->caps2 |= (MMC_CAP2_BOOTPART_NOACC |
 				MMC_CAP2_DETECT_ON_ERR);
 	msm_host->mmc->caps2 |= MMC_CAP2_CACHE_CTRL;
 	msm_host->mmc->caps2 |= MMC_CAP2_POWEROFF_NOTIFY;
-	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
+	//msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
 	msm_host->mmc->caps2 |= MMC_CAP2_STOP_REQUEST;
 	msm_host->mmc->caps2 |= MMC_CAP2_ASYNC_SDIO_IRQ_4BIT_MODE;
 	msm_host->mmc->pm_caps |= MMC_PM_KEEP_POWER | MMC_PM_WAKE_SDIO_IRQ;
 	msm_host->mmc->caps2 |= MMC_CAP2_CORE_PM;
+	msm_host->mmc->caps2 |= MMC_CAP2_NO_SLEEP_CMD;
 
 	if (msm_host->pdata->nonremovable)
 		msm_host->mmc->caps |= MMC_CAP_NONREMOVABLE;
@@ -3150,7 +3175,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		 * weird/inconsistent state resulting in flood of interrupts.
 		 */
 		sdhci_msm_setup_pins(msm_host->pdata, true);
-
+		mdelay(10);
 		ret = mmc_gpio_request_cd(msm_host->mmc,
 				msm_host->pdata->status_gpio);
 		if (ret) {
@@ -3158,6 +3183,27 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 					__func__, ret);
 			goto vreg_deinit;
 		}
+	}
+
+	/* SYSFS about SD Card Detection by soonil.lim */
+#if defined(CONFIG_NO_DETECT_PIN)
+	if (t_flash_detect_dev == NULL && !strcmp(host->hw_name, "7864900.sdhci")) {
+#else
+	if (t_flash_detect_dev == NULL && gpio_is_valid(msm_host->pdata->status_gpio)) {
+#endif
+		printk(KERN_DEBUG "%s : Change sysfs Card Detect\n", __func__);
+
+		t_flash_detect_dev = device_create(sec_class,
+				NULL, 0, NULL, "sdcard");
+		if (IS_ERR(t_flash_detect_dev))
+			pr_err("%s : Failed to create device!\n", __func__);
+
+		if (device_create_file(t_flash_detect_dev,
+			&dev_attr_status) < 0)
+			pr_err("%s : Failed to create device file(%s)!\n",
+					__func__, dev_attr_status.attr.name);
+
+		dev_set_drvdata(t_flash_detect_dev, msm_host);
 	}
 
 	if ((sdhci_readl(host, SDHCI_CAPABILITIES) & SDHCI_CAN_64BIT) &&

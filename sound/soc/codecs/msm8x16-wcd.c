@@ -45,6 +45,12 @@
 #include "wcd-mbhc-v2.h"
 #include "msm8916-wcd-irq.h"
 #include "msm8x16_wcd_registers.h"
+#ifdef CONFIG_SAMSUNG_JACK
+#include <linux/sec_jack.h>
+#endif
+#ifdef CONFIG_SND_SOC_DBMD2
+#include "dbmd2-export.h"
+#endif
 
 #define MSM8X16_WCD_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
 			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000)
@@ -164,9 +170,6 @@ static int msm8x16_wcd_dt_parse_vreg_info(struct device *dev,
 	const char *vreg_name, bool ondemand);
 static struct msm8x16_wcd_pdata *msm8x16_wcd_populate_dt_pdata(
 	struct device *dev);
-static int msm8x16_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
-					    bool turn_on);
-static void msm8x16_trim_btn_reg(struct snd_soc_codec *codec);
 
 struct msm8x16_wcd_spmi msm8x16_wcd_modules[MAX_MSM8X16_WCD_DEVICE];
 
@@ -174,10 +177,16 @@ static void *modem_state_notifier;
 
 static struct snd_soc_codec *registered_codec;
 
+#ifndef CONFIG_SAMSUNG_JACK
+static void msm8x16_trim_btn_reg(struct snd_soc_codec *codec);
+
+static int msm8x16_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
+					    bool turn_on);
 static const struct wcd_mbhc_cb mbhc_cb = {
 	.enable_mb_source = msm8x16_wcd_enable_ext_mb_source,
 	.trim_btn_reg = msm8x16_trim_btn_reg,
 };
+#endif /* not CONFIG_SAMSUNG_JACK */
 
 int msm8x16_unregister_notifier(struct snd_soc_codec *codec,
 				     struct notifier_block *nblock)
@@ -1585,6 +1594,7 @@ static int msm8x16_wcd_codec_enable_adc(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_codec *codec = w->codec;
+	struct msm8x16_wcd_priv *msm8x16_wcd = snd_soc_codec_get_drvdata(codec);
 	u16 adc_reg;
 	u8 init_bit_shift;
 
@@ -1605,6 +1615,9 @@ static int msm8x16_wcd_codec_enable_adc(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		if (!TOMBAK_IS_1_0(msm8x16_wcd->pmic_rev))
+			snd_soc_update_bits(codec,
+			MSM8X16_WCD_A_ANALOG_TX_1_2_OPAMP_BIAS, 0x07, 0x00);
 		msm8x16_wcd_codec_enable_adc_block(codec, 1);
 		if (w->reg == MSM8X16_WCD_A_ANALOG_TX_2_EN)
 			snd_soc_update_bits(codec,
@@ -1684,64 +1697,27 @@ static int msm8x16_wcd_codec_enable_spk_pa(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_PRE_PMD:
 		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_CDC_RX3_B6_CTL, 0x01, 0x01);
-		msm8x16_wcd->mute_mask |= SPKR_PA_DISABLE;
-		/*
-		 * Add sleep for 1 ms for mute to take effect
-		 */
-		usleep_range(CODEC_DELAY_1_MS, CODEC_DELAY_1_1_MS);
-		snd_soc_update_bits(codec,
-			MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL, 0x10, 0x10);
-		if (msm8x16_wcd->spk_boost_set) {
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_BOOST_EN_CTL,
-					0xDF, 0x5F);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_DIGITAL_CDC_DIG_CLK_CTL,
-					0x20, 0x00);
-		}
-		/*
-		 * Add 20 ms sleep for the boost to settle down
-		 */
 		msleep(20);
+		msm8x16_wcd->mute_mask |= SPKR_PA_DISABLE;
 		snd_soc_update_bits(codec, w->reg, 0x80, 0x00);
 		if (msm8x16_wcd->spk_boost_set)
 			snd_soc_update_bits(codec,
-				MSM8X16_WCD_A_ANALOG_SPKR_DRV_CTL, 0xEF, 0x69);
+				MSM8X16_WCD_A_ANALOG_SPKR_DRV_CTL, 0xEF, 0x00);
+		else
+			snd_soc_update_bits(codec,
+				MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL, 0x10, 0x00);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_ANALOG_SPKR_PWRSTG_CTL, 0xE0, 0x00);
+		if (!TOMBAK_IS_1_0(msm8x16_wcd->pmic_rev))
+			snd_soc_update_bits(codec,
+				MSM8X16_WCD_A_ANALOG_RX_EAR_CTL, 0x01, 0x00);
 		usleep_range(CODEC_DELAY_1_MS, CODEC_DELAY_1_1_MS);
 		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_ANALOG_SPKR_PWRSTG_CTL, 0x01, 0x00);
 		snd_soc_update_bits(codec,
-			MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL, 0x10, 0x00);
-		if (!TOMBAK_IS_1_0(msm8x16_wcd->pmic_rev))
-			snd_soc_update_bits(codec,
-				MSM8X16_WCD_A_ANALOG_RX_EAR_CTL, 0x01, 0x00);
-		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_DIGITAL_CDC_ANA_CLK_CTL, 0x10, 0x00);
-		break;
-	}
-	return 0;
-}
-
-static int msm8x16_wcd_tx_disable_pdm_clk(struct snd_soc_dapm_widget *w,
-				struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_codec *codec = w->codec;
-	struct msm8916_asoc_mach_data *pdata = NULL;
-
-	pdata = snd_soc_card_get_drvdata(codec->card);
-
-	dev_dbg(w->codec->dev, "%s event %d w->name %s\n", __func__,
-			event, w->name);
-	switch (event) {
-	case SND_SOC_DAPM_POST_PMD:
-		if (atomic_read(&pdata->mclk_rsc_ref) == 0)
-			snd_soc_update_bits(codec,
-				MSM8X16_WCD_A_CDC_CLK_PDM_CTL,
-				0x03, 0x00);
 		break;
 	}
 	return 0;
@@ -1752,9 +1728,6 @@ static int msm8x16_wcd_codec_enable_dig_clk(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_codec *codec = w->codec;
 	struct msm8x16_wcd_priv *msm8x16_wcd = snd_soc_codec_get_drvdata(codec);
-	struct msm8916_asoc_mach_data *pdata = NULL;
-
-	pdata = snd_soc_card_get_drvdata(codec->card);
 
 	dev_dbg(w->codec->dev, "%s event %d w->name %s\n", __func__,
 			event, w->name);
@@ -1762,9 +1735,6 @@ static int msm8x16_wcd_codec_enable_dig_clk(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_PRE_PMU:
 		snd_soc_update_bits(codec, w->reg, 0x80, 0x80);
 		if (msm8x16_wcd->spk_boost_set) {
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_DIGITAL_PERPH_RESET_CTL3,
-					0x0F, 0x0F);
 			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_ANALOG_SEC_ACCESS,
 					0xA5, 0xA5);
@@ -1775,34 +1745,32 @@ static int msm8x16_wcd_codec_enable_dig_clk(struct snd_soc_dapm_widget *w,
 					MSM8X16_WCD_A_ANALOG_CURRENT_LIMIT,
 					0x82, 0x82);
 			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_SPKR_DRV_CTL,
-					0x69, 0x69);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_SPKR_DRV_DBG,
-					0x01, 0x01);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_SLOPE_COMP_IP_ZERO,
-					0x88, 0x88);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL,
-					0x03, 0x03);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_SPKR_OCP_CTL,
-					0xE1, 0xE1);
-			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_DIGITAL_CDC_DIG_CLK_CTL,
 					0x20, 0x20);
 			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_ANALOG_BOOST_EN_CTL,
 					0xDF, 0xDF);
 			usleep_range(CODEC_DELAY_1_MS, CODEC_DELAY_1_1_MS);
+			snd_soc_update_bits(codec,
+					MSM8X16_WCD_A_ANALOG_CURRENT_LIMIT,
+					0x83, 0x83);
+		} else {
+			snd_soc_update_bits(codec, w->reg, 1<<w->shift,
+					1<<w->shift);
 		}
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		if (msm8x16_wcd->rx_bias_count == 0)
+		if (msm8x16_wcd->spk_boost_set) {
+			snd_soc_update_bits(codec,
+					MSM8X16_WCD_A_ANALOG_BOOST_EN_CTL,
+					0xDF, 0x5F);
 			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_DIGITAL_CDC_DIG_CLK_CTL,
-					0x80, 0x00);
+					0x20, 0x00);
+		} else {
+			snd_soc_update_bits(codec, w->reg, 1<<w->shift, 0x00);
+		}
+		break;
 	}
 	return 0;
 }
@@ -1862,6 +1830,8 @@ static int msm8x16_wcd_codec_enable_dmic(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+#ifndef CONFIG_SAMSUNG_JACK
+
 static void msm8x16_trim_btn_reg(struct snd_soc_codec *codec)
 {
 	struct msm8x16_wcd_priv *msm8x16_wcd = snd_soc_codec_get_drvdata(codec);
@@ -1882,6 +1852,7 @@ static void msm8x16_trim_btn_reg(struct snd_soc_codec *codec)
 		pr_debug("%s: This device is trimmed at ATE\n", __func__);
 	}
 }
+
 static int msm8x16_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
 					    bool turn_on)
 {
@@ -1916,6 +1887,7 @@ static int msm8x16_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
 
 	return ret;
 }
+#endif /* not CONFIG_SAMSUNG_JACK */
 
 static int msm8x16_wcd_codec_enable_micbias(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
@@ -1956,6 +1928,22 @@ static int msm8x16_wcd_codec_enable_micbias(struct snd_soc_dapm_widget *w,
 
 		break;
 	case SND_SOC_DAPM_POST_PMU:
+#ifdef CONFIG_SAMSUNG_JACK
+		if (strnstr(w->name, "MIC BIAS2 Power External", 30)) { /* for power external option */
+                        pr_info(">>> SND_SOC_DAPM_POST_PMU MIC BIAS2 Power External !!\n");
+			if (++msm8x16_wcd->micb_2_ref_cnt == 1) {
+				snd_soc_update_bits(codec, w->reg, 0x80, 0x80);
+				snd_soc_update_bits(codec, micb_int_reg, 0x18, 0x18); /* internal2 RBIAS */
+				dev_info(codec->dev,
+				"MIC BIAS2 enabled, ref_count = %d",
+				msm8x16_wcd->micb_2_ref_cnt);
+			} else {
+				dev_info(codec->dev,
+				"MIC BIAS2 already enabled, ref_count = %d",
+				msm8x16_wcd->micb_2_ref_cnt);
+			}
+		}
+#endif
 		usleep_range(20000, 20100);
 		if (strnstr(w->name, internal1_text, 30)) {
 			snd_soc_update_bits(codec, micb_int_reg, 0x40, 0x40);
@@ -1967,6 +1955,24 @@ static int msm8x16_wcd_codec_enable_micbias(struct snd_soc_dapm_widget *w,
 		msm8x16_notifier_call(codec, WCD_EVENT_PRE_MICBIAS_2_ON);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+#ifdef CONFIG_SND_SOC_DBMD2
+		msm8x16_notifier_call(codec, WCD_EVENT_PRE_MICBIAS_2_OFF);
+		break;
+#endif
+#ifdef CONFIG_SAMSUNG_JACK
+		if (strnstr(w->name, "MIC BIAS2 Power External", 30)) { /* for power external option */
+                        pr_info(">>> SND_SOC_DAPM_POST_PMD MIC BIAS2 Power External !!\n");
+			if (--msm8x16_wcd->micb_2_ref_cnt == 0) {
+				snd_soc_update_bits(codec, w->reg, 0x80, 0x00);
+				snd_soc_update_bits(codec, micb_int_reg, 0x18, 0x00); /* internal2 RBIAS */
+				dev_info(codec->dev, "MIC BIAS2 disabled, ref_count = %d",
+						msm8x16_wcd->micb_2_ref_cnt);
+			} else {
+				dev_info(codec->dev, "MIC BIAS2 not disbled, ref_count = %d",
+						msm8x16_wcd->micb_2_ref_cnt);
+			}
+		}
+#endif
 		if (strnstr(w->name, internal1_text, 30)) {
 			snd_soc_update_bits(codec, micb_int_reg, 0xC0, 0x40);
 		} else if (strnstr(w->name, internal2_text, 30) &&
@@ -1976,13 +1982,74 @@ static int msm8x16_wcd_codec_enable_micbias(struct snd_soc_dapm_widget *w,
 		} else if (strnstr(w->name, internal3_text, 30)) {
 			snd_soc_update_bits(codec, micb_int_reg, 0x2, 0x0);
 		}
-		snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_MICB_1_EN,
-				0x44, 0x00);
+#ifdef CONFIG_SAMSUNG_JACK
+			snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_MICB_1_EN,
+				0x45, 0x00);
+#else /* CONFIG_SAMSUNG_JACK */
+			snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_MICB_1_EN,
+				0x45, 0x01);
+#endif /* not CONFIG_SAMSUNG_JACK */
+
 		msm8x16_notifier_call(codec, WCD_EVENT_PRE_MICBIAS_2_OFF);
 		break;
 	}
 	return 0;
 }
+
+#ifdef CONFIG_SAMSUNG_JACK
+static int msm8x16_codec_enable_micbias_power(struct snd_soc_dapm_widget *w,
+		struct snd_kcontrol *kcontrol,
+		int event)
+{
+	struct snd_soc_codec *codec = w->codec;
+	struct msm8916_asoc_mach_data *pdata = NULL;
+	pdata = snd_soc_card_get_drvdata(w->codec->card);
+	pr_debug("%s %d\n", __func__, event);
+
+	switch (event) {
+		case SND_SOC_DAPM_PRE_PMU:
+			pr_info("%s SND_SOC_DAPM_PRE_PMU mclk_rsc_ref %d\n", __func__, atomic_read(&pdata->mclk_rsc_ref));
+			if (atomic_inc_return(&pdata->mclk_rsc_ref) >= 1)
+				msm8x16_wcd_mclk_enable(codec, 1, true);
+			msm8x16_wcd_codec_enable_on_demand_supply(w,
+					NULL, event);
+			msm8x16_wcd_codec_enable_micbias(w, kcontrol, event);
+			break;
+		case SND_SOC_DAPM_POST_PMU:
+			msm8x16_wcd_codec_enable_micbias(w, kcontrol, event);
+			if (atomic_dec_return(&pdata->mclk_rsc_ref) == 0)
+				msm8x16_wcd_mclk_enable(codec, 0, true);
+			pr_info("%s SND_SOC_DAPM_POST_PMU mclk_rsc_ref %d\n", __func__, atomic_read(&pdata->mclk_rsc_ref));
+			break;
+		case SND_SOC_DAPM_POST_PMD:
+			msm8x16_wcd_codec_enable_micbias(w, kcontrol, event);
+			msm8x16_wcd_codec_enable_on_demand_supply(w,
+					NULL, event);
+			break;
+	}
+	return 0;
+}
+
+int msm8x16_enable_micbias2(struct snd_soc_codec *codec,
+		bool enable)
+{
+	int ret = 0;
+
+	if (enable) {
+		ret = snd_soc_dapm_force_enable_pin(&codec->dapm,
+				"MIC BIAS2 Power External");
+		snd_soc_dapm_sync(&codec->dapm);
+		pr_debug("%s: Turning on MICBIAS2 ret=%d\n", __func__, ret);
+	} else {
+		ret = snd_soc_dapm_disable_pin(&codec->dapm,
+				"MIC BIAS2 Power External");
+		snd_soc_dapm_sync(&codec->dapm);
+		pr_debug("%s: Turning off MICBIAS2 ret= %d\n", __func__, ret);
+	}
+
+	return ret;
+}
+#endif
 
 static void tx_hpf_corner_freq_callback(struct work_struct *work)
 {
@@ -2007,7 +2074,6 @@ static void tx_hpf_corner_freq_callback(struct work_struct *work)
 
 	snd_soc_update_bits(codec, tx_mux_ctl_reg, 0x30, hpf_cut_of_freq << 4);
 }
-
 
 #define  TX_MUX_CTL_CUT_OFF_FREQ_MASK	0x30
 #define  CF_MIN_3DB_4HZ			0x0
@@ -2121,7 +2187,9 @@ static int msm8x16_wcd_codec_enable_dec(struct snd_soc_dapm_widget *w,
 		break;
 	case SND_SOC_DAPM_PRE_PMD:
 		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x01, 0x01);
+		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x01, 0x00);
 		msleep(20);
+		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x01, 0x01);
 		snd_soc_update_bits(codec, tx_mux_ctl_reg, 0x08, 0x08);
 		cancel_delayed_work_sync(&tx_hpf_work[decimator - 1].dwork);
 		break;
@@ -2214,25 +2282,17 @@ static int msm8x16_wcd_codec_enable_rx_bias(struct snd_soc_dapm_widget *w,
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		msm8x16_wcd->rx_bias_count++;
-		if (msm8x16_wcd->rx_bias_count == 1) {
+		if (msm8x16_wcd->rx_bias_count == 1)
 			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_ANALOG_RX_COM_BIAS_DAC,
-					0x80, 0x80);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_RX_COM_BIAS_DAC,
-					0x01, 0x01);
-		}
+					0x81, 0x81);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		msm8x16_wcd->rx_bias_count--;
-		if (msm8x16_wcd->rx_bias_count == 0) {
+		if (msm8x16_wcd->rx_bias_count == 0)
 			snd_soc_update_bits(codec,
 					MSM8X16_WCD_A_ANALOG_RX_COM_BIAS_DAC,
-					0x01, 0x00);
-			snd_soc_update_bits(codec,
-					MSM8X16_WCD_A_ANALOG_RX_COM_BIAS_DAC,
-					0x80, 0x00);
-		}
+					0x81, 0x00);
 		break;
 	}
 	dev_dbg(codec->dev, "%s rx_bias_count = %d\n",
@@ -2326,6 +2386,8 @@ static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 		break;
 
 	case SND_SOC_DAPM_POST_PMU:
+		snd_soc_update_bits(codec,
+				MSM8X16_WCD_A_DIGITAL_HDRIVE_CTL, 0x03, 0x03);
 		usleep_range(4000, 4100);
 		if (w->shift == 5)
 			snd_soc_update_bits(codec,
@@ -2367,8 +2429,9 @@ static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 			msm8x16_notifier_call(codec,
 					WCD_EVENT_POST_HPHR_PA_OFF);
 		}
+		snd_soc_update_bits(codec,
+				MSM8X16_WCD_A_ANALOG_NCP_FBCTRL, 0x20, 0x00);
 		usleep_range(4000, 4100);
-
 		usleep_range(CODEC_DELAY_1_MS, CODEC_DELAY_1_1_MS);
 		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_DIGITAL_CDC_DIG_CLK_CTL, 0x40, 0x40);
@@ -2430,6 +2493,8 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{"RX3 CHAIN", NULL, "RX3 CLK"},
 	{"RX1 CHAIN", NULL, "RX1 MIX2"},
 	{"RX2 CHAIN", NULL, "RX2 MIX2"},
+	{"RX1 CHAIN", NULL, "RX1 MIX1"},
+	{"RX2 CHAIN", NULL, "RX2 MIX1"},
 	{"RX3 CHAIN", NULL, "RX3 MIX1"},
 
 	{"RX1 MIX1", NULL, "RX1 MIX1 INP1"},
@@ -2439,9 +2504,7 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{"RX2 MIX1", NULL, "RX2 MIX1 INP2"},
 	{"RX3 MIX1", NULL, "RX3 MIX1 INP1"},
 	{"RX3 MIX1", NULL, "RX3 MIX1 INP2"},
-	{"RX1 MIX2", NULL, "RX1 MIX1"},
 	{"RX1 MIX2", NULL, "RX1 MIX2 INP1"},
-	{"RX2 MIX2", NULL, "RX2 MIX1"},
 	{"RX2 MIX2", NULL, "RX2 MIX2 INP1"},
 
 	{"RX1 MIX1 INP1", "RX1", "I2S RX1"},
@@ -2559,9 +2622,8 @@ static int msm8x16_wcd_codec_enable_clock_block(struct snd_soc_codec *codec,
 	} else {
 		snd_soc_update_bits(codec,
 			MSM8X16_WCD_A_DIGITAL_CDC_TOP_CLK_CTL, 0x0C, 0x00);
-		snd_soc_update_bits(codec,
-				MSM8X16_WCD_A_CDC_CLK_PDM_CTL, 0x03, 0x00);
-
+		snd_soc_update_bits(codec, MSM8X16_WCD_A_CDC_CLK_PDM_CTL,
+				    0x03, 0x00);
 	}
 	return 0;
 }
@@ -2845,8 +2907,6 @@ static int msm8x16_wcd_codec_enable_ear_pa(struct snd_soc_dapm_widget *w,
 			__func__);
 		snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_RX_EAR_CTL,
 			    0x80, 0x80);
-		snd_soc_update_bits(codec,
-			MSM8X16_WCD_A_ANALOG_RX_HPH_CNP_WG_TIME, 0xFF, 0x2A);
 		break;
 	case SND_SOC_DAPM_POST_PMU:
 		dev_dbg(w->codec->dev,
@@ -2877,8 +2937,6 @@ static int msm8x16_wcd_codec_enable_ear_pa(struct snd_soc_dapm_widget *w,
 		 */
 		snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_RX_EAR_CTL,
 			    0x80, 0x00);
-		snd_soc_update_bits(codec,
-			MSM8X16_WCD_A_ANALOG_RX_HPH_CNP_WG_TIME, 0xFF, 0x16);
 		break;
 	}
 	return 0;
@@ -2945,8 +3003,16 @@ static const struct snd_soc_dapm_widget msm8x16_wcd_dapm_widgets[] = {
 			SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
 			SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
 
-	SND_SOC_DAPM_MIXER("RX1 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
-	SND_SOC_DAPM_MIXER("RX2 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER_E("RX1 MIX1",
+			MSM8X16_WCD_A_CDC_CLK_RX_B1_CTL, 0, 0, NULL, 0,
+			msm8x16_wcd_codec_enable_interpolator,
+			SND_SOC_DAPM_POST_PMU |
+			SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MIXER_E("RX2 MIX1",
+			MSM8X16_WCD_A_CDC_CLK_RX_B1_CTL, 1, 0, NULL, 0,
+			msm8x16_wcd_codec_enable_interpolator,
+			SND_SOC_DAPM_POST_PMU |
+			SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_MIXER_E("RX1 MIX2",
 		MSM8X16_WCD_A_CDC_CLK_RX_B1_CTL, 0, 0, NULL,
@@ -3021,19 +3087,19 @@ static const struct snd_soc_dapm_widget msm8x16_wcd_dapm_widgets[] = {
 		msm8x16_wcd_codec_enable_charge_pump, SND_SOC_DAPM_PRE_PMU |
 		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
 
-	SND_SOC_DAPM_SUPPLY_S("RX_BIAS", 1, SND_SOC_NOPM,
+	SND_SOC_DAPM_SUPPLY("RX_BIAS", SND_SOC_NOPM,
 		0, 0, msm8x16_wcd_codec_enable_rx_bias,
 		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
-	SND_SOC_DAPM_SUPPLY_S("SPK_RX_BIAS", 1, SND_SOC_NOPM, 0, 0,
+	SND_SOC_DAPM_SUPPLY("SPK_RX_BIAS",
+		SND_SOC_NOPM, 0, 0,
 		msm8x16_wcd_codec_enable_rx_bias, SND_SOC_DAPM_PRE_PMU |
 		SND_SOC_DAPM_POST_PMD),
 
 	/* TX */
 
-	SND_SOC_DAPM_SUPPLY_S("CDC_CONN", -2, MSM8X16_WCD_A_CDC_CLK_OTHR_CTL,
+	SND_SOC_DAPM_SUPPLY("CDC_CONN", MSM8X16_WCD_A_CDC_CLK_OTHR_CTL,
 		2, 0, NULL, 0),
-
 
 	SND_SOC_DAPM_INPUT("AMIC1"),
 	SND_SOC_DAPM_MICBIAS_E("MIC BIAS Internal1",
@@ -3048,6 +3114,13 @@ static const struct snd_soc_dapm_widget msm8x16_wcd_dapm_widgets[] = {
 		MSM8X16_WCD_A_ANALOG_MICB_1_EN, 7, 0,
 		msm8x16_wcd_codec_enable_micbias, SND_SOC_DAPM_PRE_PMU |
 		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
+#ifdef CONFIG_SAMSUNG_JACK
+	SND_SOC_DAPM_MICBIAS_E("MIC BIAS2 Power External",
+		MSM8X16_WCD_A_ANALOG_MICB_2_EN, ON_DEMAND_MICBIAS, 0,
+		msm8x16_codec_enable_micbias_power,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+#endif
 	SND_SOC_DAPM_ADC_E("ADC1", NULL, MSM8X16_WCD_A_ANALOG_TX_1_EN, 7, 0,
 		msm8x16_wcd_codec_enable_adc, SND_SOC_DAPM_PRE_PMU |
 		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
@@ -3114,19 +3187,22 @@ static const struct snd_soc_dapm_widget msm8x16_wcd_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY("RX_I2S_CLK",
 		MSM8X16_WCD_A_CDC_CLK_RX_I2S_CTL,	4, 0, NULL, 0),
 	SND_SOC_DAPM_SUPPLY("TX_I2S_CLK",
-		MSM8X16_WCD_A_CDC_CLK_TX_I2S_CTL, 4, 0,
-		msm8x16_wcd_tx_disable_pdm_clk, SND_SOC_DAPM_POST_PMD),
+		MSM8X16_WCD_A_CDC_CLK_TX_I2S_CTL, 4, 0, NULL, 0),
 };
 
 static const struct msm8x16_wcd_reg_mask_val msm8x16_wcd_reg_defaults[] = {
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL, 0x03),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_CURRENT_LIMIT, 0x82),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_OCP_CTL, 0xE1),
+#ifdef CONFIG_SAMSUNG_JACK
+	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_MICB_1_INT_RBIAS, 0x00),
+	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_MICB_1_VAL, 0xC0), /* micbias 2.8V */
+#endif
 };
 
 static const struct msm8x16_wcd_reg_mask_val msm8x16_wcd_reg_defaults_2_0[] = {
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_DIGITAL_PERPH_RESET_CTL3, 0x0F),
-	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_TX_1_2_OPAMP_BIAS, 0x4F),
+	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_TX_1_2_OPAMP_BIAS, 0x4B),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_NCP_FBCTRL, 0x28),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_DRV_CTL, 0x69),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_DRV_DBG, 0x01),
@@ -3136,6 +3212,10 @@ static const struct msm8x16_wcd_reg_mask_val msm8x16_wcd_reg_defaults_2_0[] = {
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_CURRENT_LIMIT, 0x82),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_DAC_CTL, 0x03),
 	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_SPKR_OCP_CTL, 0xE1),
+#ifdef CONFIG_SAMSUNG_JACK
+	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_MICB_1_INT_RBIAS, 0x00),
+	MSM8X16_WCD_REG_VAL(MSM8X16_WCD_A_ANALOG_MICB_1_VAL, 0xC0),  /* micbias 2.8V */
+#endif
 };
 
 static void msm8x16_wcd_update_reg_defaults(struct snd_soc_codec *codec)
@@ -3161,7 +3241,11 @@ static const struct msm8x16_wcd_reg_mask_val
 	/* Initialize current threshold to 350MA
 	 * number of wait and run cycles to 4096
 	 */
+#ifdef CONFIG_SAMSUNG_JACK
+	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_CTL, 0xFF, 0xDF}, // fix ESD mute problem
+#else
 	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_CTL, 0xFF, 0xD1},
+#endif
 	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_COUNT, 0xFF, 0xFF},
 };
 
@@ -3201,9 +3285,6 @@ static struct regulator *wcd8x16_wcd_codec_find_regulator(
 
 static int msm8x16_wcd_device_down(struct snd_soc_codec *codec)
 {
-	struct msm8916_asoc_mach_data *pdata = NULL;
-
-	pdata = snd_soc_card_get_drvdata(codec->card);
 	dev_dbg(codec->dev, "%s: device down!\n", __func__);
 	msm8x16_wcd_write(codec,
 		MSM8X16_WCD_A_ANALOG_TX_1_EN, 0x3);
@@ -3220,15 +3301,16 @@ static int msm8x16_wcd_device_down(struct snd_soc_codec *codec)
 
 	msm8x16_wcd_write(codec, MSM8X16_WCD_A_DIGITAL_PERPH_RESET_CTL4, 0x1);
 	msm8x16_wcd_write(codec, MSM8X16_WCD_A_ANALOG_PERPH_RESET_CTL4, 0x1);
-	atomic_set(&pdata->mclk_enabled, false);
 	snd_soc_card_change_online_state(codec->card, 0);
 	return 0;
 }
 
 static int msm8x16_wcd_device_up(struct snd_soc_codec *codec)
 {
+#ifndef CONFIG_SAMSUNG_JACK
 	struct msm8x16_wcd_priv *msm8x16_wcd_priv =
 		snd_soc_codec_get_drvdata(codec);
+#endif /* not CONFIG_SAMSUNG_JACK */
 	u32 reg;
 	dev_dbg(codec->dev, "%s: device up!\n", __func__);
 
@@ -3258,11 +3340,11 @@ static int msm8x16_wcd_device_up(struct snd_soc_codec *codec)
 	msm8x16_wcd_bringup(codec);
 	msm8x16_wcd_codec_init_reg(codec);
 	msm8x16_wcd_update_reg_defaults(codec);
-
+#ifndef CONFIG_SAMSUNG_JACK
 	wcd_mbhc_stop(&msm8x16_wcd_priv->mbhc);
 	wcd_mbhc_start(&msm8x16_wcd_priv->mbhc,
 			msm8x16_wcd_priv->mbhc.mbhc_cfg);
-
+#endif /* not CONFIG_SAMSUNG_JACK */
 	mutex_unlock(&codec->mutex);
 
 	return 0;
@@ -3332,11 +3414,24 @@ void msm8x16_wcd_hs_detect_exit(struct snd_soc_codec *codec)
 }
 EXPORT_SYMBOL(msm8x16_wcd_hs_detect_exit);
 
+#ifdef CONFIG_SAMSUNG_JACK
+bool codec_probe_done = false;
+
+bool is_codec_probe_done(void)
+{
+	return codec_probe_done;
+}
+EXPORT_SYMBOL(is_codec_probe_done);
+#endif /* CONFIG_SAMSUNG_JACK */
+
 static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 {
 	struct msm8x16_wcd_priv *msm8x16_wcd_priv;
 	struct msm8x16_wcd *msm8x16_wcd;
 	int i;
+#ifdef CONFIG_SND_SOC_DBMD2
+	int rc;
+#endif
 
 	dev_dbg(codec->dev, "%s()\n", __func__);
 
@@ -3384,13 +3479,19 @@ static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 
 	BLOCKING_INIT_NOTIFIER_HEAD(&msm8x16_wcd_priv->notifier);
 
+#if !defined(CONFIG_SAMSUNG_JACK)
 	wcd_mbhc_init(&msm8x16_wcd_priv->mbhc, codec, &mbhc_cb, &intr_ids,
 			false);
+#elif defined(SEC_USE_SOC_JACK_API)
+	sec_jack_soc_init(codec->card);
+#endif /* CONFIG_SAMSUNG_JACK */
 
 	msm8x16_wcd_priv->mclk_enabled = false;
 	msm8x16_wcd_priv->clock_active = false;
 	msm8x16_wcd_priv->config_mode_active = false;
-
+#ifdef CONFIG_SAMSUNG_JACK
+	msm8x16_wcd_priv->micb_2_ref_cnt = 0;
+#endif
 	registered_codec = codec;
 	modem_state_notifier =
 	    subsys_notif_register_notifier("modem",
@@ -3403,6 +3504,16 @@ static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 		registered_codec = NULL;
 		return -ENOMEM;
 	}
+#ifdef CONFIG_SAMSUNG_JACK
+	codec_probe_done = true;
+#endif /* CONFIG_SAMSUNG_JACK */
+#ifdef CONFIG_SND_SOC_DBMD2
+	dbmd2_remote_add_codec_controls(codec);
+
+	rc = snd_soc_dapm_force_enable_pin(&codec->dapm, "MIC BIAS External");
+	if(!rc)
+		snd_soc_dapm_sync(&codec->dapm);
+#endif
 	return 0;
 }
 
@@ -3877,4 +3988,3 @@ module_exit(msm8x16_wcd_codec_exit);
 MODULE_DESCRIPTION("MSM8x16 Audio codec driver");
 MODULE_LICENSE("GPL v2");
 MODULE_DEVICE_TABLE(of, msm8x16_wcd_spmi_id_table);
-
