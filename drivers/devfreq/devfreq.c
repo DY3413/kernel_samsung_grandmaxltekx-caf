@@ -668,7 +668,7 @@ int devfreq_add_governor(struct devfreq_governor *governor)
 							DEVFREQ_GOV_STOP, NULL);
 				if (ret) {
 					dev_warn(dev,
-						 "%s: GLNX.LA.3.7.1.c5-07700-8x16.0overnor %s stop = %d\n",
+						 "%s: Governor %s stop = %d\n",
 						 __func__,
 						 devfreq->governor->name, ret);
 				}
